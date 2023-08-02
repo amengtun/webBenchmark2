@@ -6,12 +6,14 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/EDDYCJY/fake-useragent"
 	"io"
 	"io/ioutil"
+	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,9 +21,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"net"
-
-	URL "net/url"
 
 	"github.com/apoorvam/goterminal"
 	"github.com/shirou/gopsutil/cpu"
@@ -32,7 +31,7 @@ import (
 
 const (
 	letterIdxBits = 6
-	letterIdxMask = 1 << letterIdxBits - 1
+	letterIdxMask = 1<<letterIdxBits - 1
 	letterIdxMax  = 63 / letterIdxBits
 )
 
@@ -45,7 +44,7 @@ const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 var SpeedQueue = list.New()
 var SpeedIndex uint64 = 0
-
+var SuccessCount uint64 = 0
 
 type header struct {
 	key, value string
@@ -100,7 +99,6 @@ func RandStringBytesMaskImpr(n int) string {
 }
 
 func generateRandomIPAddress() string {
-	rand.Seed(time.Now().Unix())
 	ip := fmt.Sprintf("%d.%d.%d.%d", rand.Intn(255), rand.Intn(255), rand.Intn(255), rand.Intn(255))
 	return ip
 }
@@ -130,13 +128,13 @@ func LeastSquares(x []float64, y []float64) (a float64, b float64) {
 
 func showStat() {
 	initialNetCounter, _ := netstat.IOCounters(true)
-	iplist := ""
-	if customIP !=nil && len(customIP)>0{
-		iplist = customIP.String()
-	}else{
-		u, _ := URL.Parse(*url)
-		iplist = strings.Join(nslookup(u.Hostname(),"8.8.8.8"),",")
-	}
+	// iplist := ""
+	// if customIP != nil && len(customIP) > 0 {
+	// 	iplist = customIP.String()
+	// } else {
+	// 	u, _ := url.Parse(*downloadURL)
+	// 	iplist = strings.Join(nslookup(u.Hostname(), "8.8.8.8"), ",")
+	// }
 
 	for true {
 		percent, _ := cpu.Percent(time.Second, false)
@@ -144,9 +142,9 @@ func showStat() {
 		netCounter, _ := netstat.IOCounters(true)
 		loadStat, _ := load.Avg()
 
-		fmt.Fprintf(TerminalWriter, "URL:%s\n", *url)
-		fmt.Fprintf(TerminalWriter, "IP:%s\n", iplist)
-
+		fmt.Fprintf(TerminalWriter, "URL:%s\n", *downloadURL)
+		// fmt.Fprintf(TerminalWriter, "IP:%s\n", iplist)
+		fmt.Fprintf(TerminalWriter, "Success Count:%d\n", SuccessCount)
 		fmt.Fprintf(TerminalWriter, "CPU:%.3f%% \n", percent)
 		fmt.Fprintf(TerminalWriter, "Memory:%.3f%% \n", memStat.UsedPercent)
 		fmt.Fprintf(TerminalWriter, "Load:%.3f %.3f %.3f\n", loadStat.Load1, loadStat.Load5, loadStat.Load15)
@@ -180,7 +178,7 @@ func showStat() {
 			//	_, b := LeastSquares(x, y)
 			//	log.Printf("Speed Vertical:%.3f\n", b)
 			//}
-			fmt.Fprintf(TerminalWriter, "Nic:%v,Recv %s(%s/s),Send %s(%s/s)\n", netCounter[i].Name,
+			fmt.Fprintf(TerminalWriter, "Nic:%v,Recv %s(%s/s),Send %s(%s/s)    \n", netCounter[i].Name,
 				readableBytes(float64(netCounter[i].BytesRecv)),
 				readableBytes(RecvBytes),
 				readableBytes(float64(netCounter[i].BytesSent)),
@@ -229,59 +227,69 @@ func nslookup(targetAddress, server string) (res []string) {
 	return
 }
 
+func clientFactory(Url string) *http.Client {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
+	if customIP != nil && len(customIP) > 0 {
+		dialer := &net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			ip := customIP[rand.Intn(len(customIP))]
+			if strings.HasPrefix(Url, "https") {
+				addr = ip + ":443"
+			} else if strings.HasPrefix(Url, "http") {
+				addr = ip + ":80"
+			} else {
+				addr = ip + ":80"
+			}
+			// fmt.Println("DialContext addr:", addr)
+			return dialer.DialContext(ctx, network, addr)
+		}
+	}
+
+	if *socksProxy != "" {
+		transport.Proxy = func(r *http.Request) (*url.URL, error) {
+			return url.Parse("socks5://" + *socksProxy)
+		}
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   time.Second * 10,
+	}
+}
+
 func goFun(Url string, postContent string, Referer string, XforwardFor bool, customIP ipArray, wg *sync.WaitGroup) {
+	// sstat := *stat
+	randQuery := *randq
+	client := clientFactory(Url)
+
 	defer func() {
 		if r := recover(); r != nil {
 			go goFun(Url, postContent, Referer, XforwardFor, customIP, wg)
 		}
 	}()
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-
 	for true {
-		if customIP != nil && len(customIP) > 0 {
-			dialer := &net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}
-			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				rand.Seed(time.Now().Unix())
-				ip := customIP[rand.Intn(len(customIP))]
-				if strings.HasPrefix(addr, "https") {
-					addr = ip + ":443"
-				} else if strings.HasPrefix(addr, "http") {
-					addr = ip + ":80"
-				} else {
-					addr = ip + ":80"
-				}
-				return dialer.DialContext(ctx, network, addr)
-			}
-			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				rand.Seed(time.Now().Unix())
-				ip := customIP[rand.Intn(len(customIP))]
-				if strings.HasPrefix(addr, "https") {
-					addr = ip + ":443"
-				} else if strings.HasPrefix(addr, "http") {
-					addr = ip + ":80"
-				} else {
-					addr = ip + ":80"
-				}
-				return dialer.DialContext(ctx, network, addr)
-			}
+		if !*reuseClient {
+			client = clientFactory(Url)
 		}
 
 		var request *http.Request
-		var err1 error = nil
-		client := &http.Client{
-			Transport: transport,
-			Timeout: time.Second*10,
+		var err1 error
+
+		Url2 := Url
+		if randQuery {
+			Url2 += "?" + RandStringBytesMaskImpr(10) + "=" + RandStringBytesMaskImpr(10)
 		}
 		if len(postContent) > 0 {
-			request, err1 = http.NewRequest("POST", Url, strings.NewReader(postContent))
+			request, err1 = http.NewRequest("POST", Url2, strings.NewReader(postContent))
 		} else {
-			request, err1 = http.NewRequest("GET", Url, nil)
+			request, err1 = http.NewRequest("GET", Url2, nil)
 		}
 		if err1 != nil {
 			continue
@@ -289,8 +297,8 @@ func goFun(Url string, postContent string, Referer string, XforwardFor bool, cus
 		if len(Referer) == 0 {
 			Referer = Url
 		}
-		request.Header.Add("Cookie", RandStringBytesMaskImpr(12))
-		request.Header.Add("User-Agent", browser.Random())
+		// request.Header.Add("Cookie", RandStringBytesMaskImpr(12))
+		// request.Header.Add("User-Agent", browser.Random())
 		request.Header.Add("Referer", Referer)
 		if XforwardFor {
 			randomip := generateRandomIPAddress()
@@ -298,19 +306,19 @@ func goFun(Url string, postContent string, Referer string, XforwardFor bool, cus
 			request.Header.Add("X-Real-IP", randomip)
 		}
 
-		if len(headers)>0 {
+		if len(headers) > 0 {
 			for _, head := range headers {
 				headKey := head.key
 				headValue := head.value
-				if strings.HasPrefix(head.key,"Random") {
+				if strings.HasPrefix(head.key, "Random") {
 					count, convErr := strconv.Atoi(strings.ReplaceAll(head.value, "Random", ""))
-					if convErr==nil {
+					if convErr == nil {
 						headKey = RandStringBytesMaskImpr(count)
 					}
 				}
-				if strings.HasPrefix(head.value,"Random"){
+				if strings.HasPrefix(head.value, "Random") {
 					count, convErr := strconv.Atoi(strings.ReplaceAll(head.value, "Random", ""))
-					if convErr==nil {
+					if convErr == nil {
 						headValue = RandStringBytesMaskImpr(count)
 					}
 				}
@@ -323,64 +331,64 @@ func goFun(Url string, postContent string, Referer string, XforwardFor bool, cus
 		if err2 != nil {
 			continue
 		}
+
+		respStr := fmt.Sprintln(resp)
+		if resp.StatusCode != 200 {
+			log.Println(request)
+			log.Println("[MAYBE FUCKED]", respStr)
+		} else if strings.Contains(respStr, "HIT") {
+			log.Println(request)
+			log.Println("[MAYBE CACHE HIT]", respStr)
+		} else {
+			SuccessCount++
+		}
+
 		io.Copy(ioutil.Discard, resp.Body)
 		resp.Body.Close()
-
 	}
 	wg.Done()
 }
+
 var h = flag.Bool("h", false, "this help")
 var count = flag.Int("c", 16, "concurrent thread for download,default 16")
-var url = flag.String("s", "http://speedtest4.tele2.net/1GB.zip", "target url")
+var reuseClient = flag.Bool("reuse", true, "reuse the client")
+var downloadURL = flag.String("s", "", "target url")
+var stat = flag.Bool("stat", false, "show stat")
+var randq = flag.Bool("rand", true, "rand query")
 var postContent = flag.String("p", "", "post content")
 var referer = flag.String("r", "", "referer url")
 var xforwardfor = flag.Bool("f", true, "randomized X-Forwarded-For and X-Real-IP address")
-var TerminalWriter = goterminal.New(os.Stdout)
+var socksProxy = flag.String("proxy", "", "socks5 proxy")
+var TerminalWriter = goterminal.New(os.Stderr)
 var customIP ipArray
 var headers headersList
 
-func usage() {
-	fmt.Fprintf(os.Stderr,
-`webBenchmark version: /0.6
-Usage: webBenchmark [-c concurrent] [-s target] [-p] [-r refererUrl] [-f] [-i ip]
-
-Options:
-`)
-	flag.PrintDefaults()
-	fmt.Fprintf(os.Stderr,
-`
-Advanced Example:
-webBenchmark -c 16 -s https://some.website -r https://referer.url -i 10.0.0.1 -i 10.0.0.2 
-	16 concurrent to benchmark https://some.website with https://referer.url directly to ip 10.0.0.1 and 10.0.0.2
-webBenchmark -c 16 -s https://some.website -r https://referer.url
-	16 concurrent to benchmark https://some.website with https://referer.url to dns resolved ip address
-
-`)
-}
-
 func main() {
+	rand.Seed(time.Now().Unix())
 	flag.Var(&customIP, "i", "custom ip address for that domain, multiple addresses automatically will be assigned randomly")
 	flag.Var(&headers, "H", "custom header")
-	flag.Usage = usage
 	flag.Parse()
-	if *h {
+	if *h || *downloadURL == "" {
 		flag.Usage()
 		return
 	}
 	routines := *count
 
-	if customIP != nil && len(customIP) > 0 && routines < len(customIP){
+	if customIP != nil && len(customIP) > 0 && routines < len(customIP) {
 		routines = len(customIP)
 	}
 
-	go showStat()
+	if *stat {
+		go showStat()
+	}
+
 	var waitgroup sync.WaitGroup
 	if routines <= 0 {
 		routines = 16
 	}
 	for i := 0; i < routines; i++ {
 		waitgroup.Add(1)
-		go goFun(*url, *postContent, *referer, *xforwardfor, customIP, &waitgroup)
+		go goFun(*downloadURL, *postContent, *referer, *xforwardfor, customIP, &waitgroup)
 	}
 	waitgroup.Wait()
 	TerminalWriter.Reset()
