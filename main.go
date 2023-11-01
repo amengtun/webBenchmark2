@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	"math/rand"
@@ -19,8 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
 
 	"github.com/apoorvam/goterminal"
 	"github.com/shirou/gopsutil/cpu"
@@ -136,7 +133,7 @@ func showStat() {
 	// 	iplist = strings.Join(nslookup(u.Hostname(), "8.8.8.8"), ",")
 	// }
 
-	for true {
+	for {
 		percent, _ := cpu.Percent(time.Second, false)
 		memStat, _ := mem.VirtualMemory()
 		netCounter, _ := netstat.IOCounters(true)
@@ -200,39 +197,12 @@ func readableBytes(bytes float64) (expression string) {
 	return fmt.Sprintf("%.3f%s", bytes/math.Pow(1024, i), sizes[int(i)])
 }
 
-func nslookup(targetAddress, server string) (res []string) {
-	if server == "" {
-		server = "8.8.8.8"
-	}
-	c := dns.Client{}
-	m := dns.Msg{}
-	m.SetQuestion(targetAddress+".", dns.TypeA)
-
-	ns := server + ":53"
-	r, t, err := c.Exchange(&m, ns)
-	if err != nil {
-		fmt.Printf("nameserver %s error: %v\n", ns, err)
-		return res
-	}
-	fmt.Printf("nameserver %s took %v", ns, t)
-	if len(r.Answer) == 0 {
-		return res
-	}
-	for _, ans := range r.Answer {
-		if ans.Header().Rrtype == dns.TypeA {
-			Arecord := ans.(*dns.A)
-			res = append(res, fmt.Sprintf("%s", Arecord))
-		}
-	}
-	return
-}
-
 func clientFactory(Url string) *http.Client {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 
-	if customIP != nil && len(customIP) > 0 {
+	if len(customIP) > 0 {
 		dialer := &net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -263,18 +233,18 @@ func clientFactory(Url string) *http.Client {
 	}
 }
 
-func goFun(Url string, postContent string, Referer string, XforwardFor bool, customIP ipArray, wg *sync.WaitGroup) {
+func goFun(Url string, postContent string, Referer string, XforwardFor bool, customIP ipArray) {
 	// sstat := *stat
 	randQuery := *randq
 	client := clientFactory(Url)
 
 	defer func() {
 		if r := recover(); r != nil {
-			go goFun(Url, postContent, Referer, XforwardFor, customIP, wg)
+			go goFun(Url, postContent, Referer, XforwardFor, customIP)
 		}
 	}()
 
-	for true {
+	for {
 		if !*reuseClient {
 			client = clientFactory(Url)
 		}
@@ -343,15 +313,18 @@ func goFun(Url string, postContent string, Referer string, XforwardFor bool, cus
 			SuccessCount++
 		}
 
-		io.Copy(ioutil.Discard, resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
+
+		if !*reuseClient {
+			client.CloseIdleConnections()
+		}
 	}
-	wg.Done()
 }
 
 var h = flag.Bool("h", false, "this help")
 var count = flag.Int("c", 16, "concurrent thread for download,default 16")
-var reuseClient = flag.Bool("reuse", true, "reuse the client")
+var reuseClient = flag.Bool("reuse", false, "reuse the client")
 var downloadURL = flag.String("s", "", "target url")
 var stat = flag.Bool("stat", false, "show stat")
 var randq = flag.Bool("rand", true, "rand query")
@@ -374,7 +347,7 @@ func main() {
 	}
 	routines := *count
 
-	if customIP != nil && len(customIP) > 0 && routines < len(customIP) {
+	if len(customIP) > 0 && routines < len(customIP) {
 		routines = len(customIP)
 	}
 
@@ -388,7 +361,7 @@ func main() {
 	}
 	for i := 0; i < routines; i++ {
 		waitgroup.Add(1)
-		go goFun(*downloadURL, *postContent, *referer, *xforwardfor, customIP, &waitgroup)
+		go goFun(*downloadURL, *postContent, *referer, *xforwardfor, customIP)
 	}
 	waitgroup.Wait()
 	TerminalWriter.Reset()
